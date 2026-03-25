@@ -5,34 +5,84 @@ const PORT = process.env.PORT || 3000;
 const MAX_ROOM_SIZE = 10;
 const rooms = new Map();
 
+function getRoom(roomName) {
+  if (!rooms.has(roomName)) {
+    rooms.set(roomName, {
+      clients: new Set(),
+      chat: []
+    });
+  }
+  return rooms.get(roomName);
+}
+
 function getRoomUsers(roomName) {
-  const peers = rooms.get(roomName) || new Set();
-  return [...peers].map((client) => ({
+  const room = rooms.get(roomName);
+  if (!room) return [];
+
+  return [...room.clients].map((client) => ({
     id: client.clientId,
     name: client.userName || "Unknown"
   }));
 }
 
-function broadcastRoomUsers(roomName) {
-  const peers = rooms.get(roomName);
-  if (!peers) return;
+function getLobbyList() {
+  return [...rooms.entries()]
+    .map(([name, room]) => ({
+      room: name,
+      count: room.clients.size
+    }))
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count || a.room.localeCompare(b.room))
+    .slice(0, 50);
+}
 
+function broadcastLobbyList() {
   const payload = JSON.stringify({
-    type: "room-users",
-    users: getRoomUsers(roomName),
-    count: peers.size
+    type: "lobby-list",
+    rooms: getLobbyList()
   });
 
-  for (const client of peers) {
+  for (const client of wss.clients) {
     if (client.readyState === 1) {
       client.send(payload);
     }
   }
 }
 
+function broadcastRoomUsers(roomName) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+
+  const payload = JSON.stringify({
+    type: "room-users",
+    users: getRoomUsers(roomName),
+    count: room.clients.size
+  });
+
+  for (const client of room.clients) {
+    if (client.readyState === 1) {
+      client.send(payload);
+    }
+  }
+}
+
+function broadcastToRoom(roomName, payload, excludeClient = null) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+
+  const message = JSON.stringify(payload);
+  for (const client of room.clients) {
+    if (client !== excludeClient && client.readyState === 1) {
+      client.send(message);
+    }
+  }
+}
+
 function sendToClient(targetId, roomName, payload) {
-  const peers = rooms.get(roomName) || new Set();
-  for (const client of peers) {
+  const room = rooms.get(roomName);
+  if (!room) return false;
+
+  for (const client of room.clients) {
     if (client.clientId === targetId && client.readyState === 1) {
       client.send(JSON.stringify(payload));
       return true;
@@ -59,7 +109,7 @@ const html = `<!DOCTYPE html>
     }
     .app {
       width: 100%;
-      max-width: 1350px;
+      max-width: 1550px;
       margin: 0 auto;
       background: #111827;
       border-radius: 18px;
@@ -76,13 +126,14 @@ const html = `<!DOCTYPE html>
       gap: 12px;
       margin-bottom: 16px;
     }
-    input, button {
+    input, button, textarea {
       border: none;
       border-radius: 12px;
       padding: 12px 14px;
       font-size: 16px;
+      font-family: inherit;
     }
-    input {
+    input, textarea {
       background: #1f2937;
       color: white;
       width: 100%;
@@ -105,7 +156,7 @@ const html = `<!DOCTYPE html>
     }
     .layout {
       display: grid;
-      grid-template-columns: 1.8fr 1fr;
+      grid-template-columns: 2fr 1fr;
       gap: 18px;
     }
     .panel {
@@ -132,20 +183,36 @@ const html = `<!DOCTYPE html>
     }
     .videos {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 14px;
       margin-top: 16px;
+      align-items: start;
     }
     .video-card {
       background: #0b1220;
       border-radius: 16px;
       padding: 12px;
+      min-width: 0;
+      min-height: 240px;
+    }
+    .video-card.screen-share {
+      grid-column: 1 / -1;
+      resize: both;
+      overflow: auto;
+      min-width: 360px;
+      min-height: 260px;
+      max-width: 100%;
     }
     video {
       width: 100%;
       border-radius: 12px;
       background: black;
       min-height: 180px;
+      max-height: 75vh;
+      object-fit: contain;
+    }
+    .video-card.screen-share video {
+      min-height: 240px;
     }
     .label {
       margin-top: 8px;
@@ -158,35 +225,51 @@ const html = `<!DOCTYPE html>
       font-weight: 700;
       margin-bottom: 10px;
     }
-    .users {
+    .users, .lobby-list {
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
-    .user-item {
+    .user-item, .lobby-item {
       background: #111827;
       border: 1px solid rgba(255,255,255,0.06);
       border-radius: 12px;
       padding: 10px 12px;
       font-size: 14px;
     }
-    .logs {
+    .lobby-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .lobby-item button {
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .logs, .chat-messages {
       display: flex;
       flex-direction: column;
       gap: 8px;
-      max-height: 300px;
+      max-height: 260px;
       overflow: auto;
     }
-    .log-item {
+    .log-item, .chat-item {
       background: #111827;
       border-radius: 12px;
       padding: 10px 12px;
       font-size: 13px;
       color: #d1d5db;
+      word-break: break-word;
     }
-    .log-time {
+    .log-time, .chat-time {
       color: #93c5fd;
       margin-right: 8px;
+    }
+    .chat-name {
+      color: #c4b5fd;
+      font-weight: 700;
+      margin-right: 6px;
     }
     .badge {
       display: inline-block;
@@ -198,13 +281,40 @@ const html = `<!DOCTYPE html>
       margin-left: 8px;
       vertical-align: middle;
     }
+    .chat-input-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .chat-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .emoji-btn {
+      background: #1f2937;
+      padding: 8px 10px;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .right-stack {
+      display: grid;
+      gap: 16px;
+    }
 
-    @media (max-width: 980px) {
+    @media (max-width: 1100px) {
       .layout {
         grid-template-columns: 1fr;
       }
+    }
+    @media (max-width: 980px) {
       .top {
         grid-template-columns: 1fr;
+      }
+      .video-card.screen-share {
+        min-width: 0;
       }
     }
   </style>
@@ -232,7 +342,7 @@ const html = `<!DOCTYPE html>
 
         <div class="panel">
           <div class="status" id="status">Not connected</div>
-          <div class="small" id="modeText">Noise suppression, echo cancellation, and auto gain are enabled when supported.</div>
+          <div class="small" id="modeText">Custom mic filter enabled. Chat and lobby list added.</div>
         </div>
 
         <div class="videos" id="videosGrid">
@@ -243,14 +353,41 @@ const html = `<!DOCTYPE html>
         </div>
       </div>
 
-      <div>
-        <div class="panel" style="margin-bottom:16px;">
+      <div class="right-stack">
+        <div class="panel">
+          <div class="section-title">
+            Online rooms
+            <span class="badge" id="lobbyBadge">0</span>
+          </div>
+          <div class="lobby-list" id="lobbyList">
+            <div class="lobby-item">No active rooms</div>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="section-title">
             Users in room
             <span class="badge" id="countBadge">0</span>
           </div>
           <div class="users" id="usersList">
             <div class="user-item">No one connected yet</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="section-title">Chat</div>
+          <div class="chat-messages" id="chatMessages"></div>
+          <div class="chat-actions">
+            <button class="emoji-btn" data-emoji="😀">😀</button>
+            <button class="emoji-btn" data-emoji="😂">😂</button>
+            <button class="emoji-btn" data-emoji="🔥">🔥</button>
+            <button class="emoji-btn" data-emoji="❤️">❤️</button>
+            <button class="emoji-btn" data-emoji="👍">👍</button>
+            <button class="emoji-btn" data-emoji="🎉">🎉</button>
+          </div>
+          <div class="chat-input-row">
+            <input id="chatInput" placeholder="Write a message..." maxlength="500" />
+            <button id="sendChatBtn">Send</button>
           </div>
         </div>
 
@@ -279,13 +416,18 @@ const html = `<!DOCTYPE html>
   const modeText = document.getElementById("modeText");
   const localVideo = document.getElementById("localVideo");
   const localLabel = document.getElementById("localLabel");
+  const localCard = document.getElementById("localCard");
   const videosGrid = document.getElementById("videosGrid");
   const usersList = document.getElementById("usersList");
   const countBadge = document.getElementById("countBadge");
   const logs = document.getElementById("logs");
+  const lobbyList = document.getElementById("lobbyList");
+  const lobbyBadge = document.getElementById("lobbyBadge");
+  const chatMessages = document.getElementById("chatMessages");
+  const chatInput = document.getElementById("chatInput");
+  const sendChatBtn = document.getElementById("sendChatBtn");
 
   let ws = null;
-  let localStream = null;
   let room = "";
   let myName = "";
   let myId = null;
@@ -297,9 +439,15 @@ const html = `<!DOCTYPE html>
   let cameraTrack = null;
   let screenTrack = null;
 
+  let localStream = null;
+  let audioContext = null;
+  let rawMicStream = null;
+  let processedAudioTrack = null;
+
   const peerConnections = new Map();
   const remoteStreams = new Map();
   const remoteNames = new Map();
+  const peerMeta = new Map();
   let currentUsers = [];
 
   const params = new URLSearchParams(window.location.search);
@@ -326,15 +474,31 @@ const html = `<!DOCTYPE html>
     logs.prepend(el);
   }
 
+  function addChatMessage(name, text, time, mine = false) {
+    const el = document.createElement("div");
+    el.className = "chat-item";
+    el.innerHTML =
+      '<span class="chat-time">' + escapeHtml(time || nowTime()) + '</span>' +
+      '<span class="chat-name">' + escapeHtml(name) + (mine ? ' (you)' : '') + ':</span> ' +
+      escapeHtml(text);
+    chatMessages.appendChild(el);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function clearChat() {
+    chatMessages.innerHTML = "";
+  }
+
   function setStatus(text) {
     statusEl.textContent = text;
   }
 
   function updateModeText() {
     const parts = [];
-    parts.push(hasCamera ? "Camera + microphone mode" : "Audio-only mode");
-    parts.push("Noise suppression on when browser supports it");
-    if (isScreenSharing) parts.push("Screen sharing active");
+    parts.push(hasCamera ? "Camera + mic mode" : "Audio-only mode");
+    parts.push("Custom mic filter on");
+    parts.push(isScreenSharing ? "Screen sharing active" : "No screen sharing");
+    parts.push(joined ? "Chat enabled" : "Join room to chat");
     modeText.textContent = parts.join(" • ");
   }
 
@@ -362,10 +526,43 @@ const html = `<!DOCTYPE html>
     updateRemoteLabels();
   }
 
+  function renderLobby(rooms) {
+    const list = rooms || [];
+    lobbyBadge.textContent = String(list.length);
+
+    if (!list.length) {
+      lobbyList.innerHTML = '<div class="lobby-item">No active rooms</div>';
+      return;
+    }
+
+    lobbyList.innerHTML = "";
+    for (const item of list) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "lobby-item";
+
+      const info = document.createElement("div");
+      info.textContent = item.room + " (" + item.count + " online)";
+
+      const btn = document.createElement("button");
+      btn.className = "secondary";
+      btn.textContent = "Join";
+      btn.onclick = () => {
+        roomInput.value = item.room;
+      };
+
+      wrapper.appendChild(info);
+      wrapper.appendChild(btn);
+      lobbyList.appendChild(wrapper);
+    }
+  }
+
   function updateRemoteLabels() {
     for (const [peerId, name] of remoteNames.entries()) {
       const label = document.getElementById("label-" + peerId);
-      if (label) label.textContent = name;
+      if (!label) continue;
+      const meta = peerMeta.get(peerId);
+      const suffix = meta && meta.isScreenSharing ? " • screen" : "";
+      label.textContent = name + suffix;
     }
   }
 
@@ -381,72 +578,125 @@ const html = `<!DOCTYPE html>
     }
   }
 
+  async function createProcessedAudioTrack() {
+    rawMicStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      },
+      video: false
+    });
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    const source = audioContext.createMediaStreamSource(rawMicStream);
+    const highpass = audioContext.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.frequency.value = 100;
+
+    const lowpass = audioContext.createBiquadFilter();
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = 7200;
+
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.value = -24;
+    compressor.knee.value = 20;
+    compressor.ratio.value = 10;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.2;
+
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1.0;
+
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 1024;
+
+    const destination = audioContext.createMediaStreamDestination();
+
+    source.connect(highpass);
+    highpass.connect(lowpass);
+    lowpass.connect(compressor);
+    compressor.connect(gainNode);
+    gainNode.connect(analyser);
+    gainNode.connect(destination);
+
+    const data = new Uint8Array(analyser.fftSize);
+    const gateThreshold = 0.018;
+
+    function noiseGateTick() {
+      if (!audioContext) return;
+
+      analyser.getByteTimeDomainData(data);
+
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+
+      const rms = Math.sqrt(sum / data.length);
+
+      if (micEnabled) {
+        gainNode.gain.setTargetAtTime(rms < gateThreshold ? 0.03 : 1.0, audioContext.currentTime, 0.02);
+      } else {
+        gainNode.gain.setTargetAtTime(0.0, audioContext.currentTime, 0.01);
+      }
+
+      requestAnimationFrame(noiseGateTick);
+    }
+
+    noiseGateTick();
+
+    processedAudioTrack = destination.stream.getAudioTracks()[0];
+    return processedAudioTrack;
+  }
+
   async function startMedia() {
     if (localStream) return localStream;
 
     const info = await listDevicesInfo();
+    const audioTrack = await createProcessedAudioTrack();
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        },
+      const camStream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 }
-        }
+        },
+        audio: false
       });
 
-      hasCamera = localStream.getVideoTracks().length > 0;
-      cameraTrack = localStream.getVideoTracks()[0] || null;
+      cameraTrack = camStream.getVideoTracks()[0] || null;
+      hasCamera = !!cameraTrack;
+
+      localStream = new MediaStream();
+      localStream.addTrack(audioTrack);
+      if (cameraTrack) localStream.addTrack(cameraTrack);
+
       localVideo.srcObject = localStream;
+      localCard.classList.remove("screen-share");
       updateModeText();
       setStatus("Mic and camera access granted");
       return localStream;
     } catch (err) {
-      console.error("Full media error:", err);
+      console.error("Camera error:", err);
 
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          },
-          video: false
-        });
+      localStream = new MediaStream();
+      localStream.addTrack(audioTrack);
+      cameraTrack = null;
+      hasCamera = false;
 
-        hasCamera = false;
-        cameraTrack = null;
-        localVideo.srcObject = localStream;
-        toggleCamBtn.disabled = true;
-        toggleCamBtn.textContent = "No camera found";
-        updateModeText();
-        setStatus("Camera unavailable. Joined with microphone only.");
-        return localStream;
-      } catch (audioErr) {
-        console.error("Audio-only error:", audioErr);
-
-        if (audioErr.name === "NotAllowedError" || err.name === "NotAllowedError") {
-          alert("You denied microphone/camera permission. Please allow access in the browser.");
-        } else if (audioErr.name === "NotFoundError" || err.name === "NotFoundError") {
-          alert(
-            "No working microphone/camera was found.\\n\\n" +
-            "Detected devices:\\n" +
-            "- Microphones: " + info.audioInputs + "\\n" +
-            "- Cameras: " + info.videoInputs + "\\n\\n" +
-            "Check browser permissions and Windows privacy settings."
-          );
-        } else if (audioErr.name === "NotReadableError" || err.name === "NotReadableError") {
-          alert("Microphone or camera is busy in another app. Close Discord, Zoom, OBS, etc.");
-        } else {
-          alert("Could not access media devices: " + audioErr.message);
-        }
-
-        throw audioErr;
-      }
+      localVideo.srcObject = localStream;
+      toggleCamBtn.disabled = true;
+      toggleCamBtn.textContent = "No camera found";
+      localCard.classList.remove("screen-share");
+      updateModeText();
+      setStatus(
+        "Camera unavailable. Joined with microphone only.\\n" +
+        "Mics found: " + info.audioInputs + " | Cameras found: " + info.videoInputs
+      );
+      return localStream;
     }
   }
 
@@ -472,15 +722,31 @@ const html = `<!DOCTYPE html>
     videosGrid.appendChild(card);
   }
 
+  function applyScreenShareCardStyle(peerId, enabled) {
+    const card = document.getElementById("card-" + peerId);
+    if (!card) return;
+    if (enabled) card.classList.add("screen-share");
+    else card.classList.remove("screen-share");
+  }
+
   function removeRemoteCard(peerId) {
     const card = document.getElementById("card-" + peerId);
     if (card) card.remove();
+  }
+
+  function getCurrentVideoTrack() {
+    if (isScreenSharing && screenTrack) return screenTrack;
+    if (cameraTrack) return cameraTrack;
+    return null;
   }
 
   function createPeerConnection(peerId, peerName, shouldInitiate) {
     if (peerConnections.has(peerId)) return peerConnections.get(peerId);
 
     remoteNames.set(peerId, peerName || "User");
+    if (!peerMeta.has(peerId)) {
+      peerMeta.set(peerId, { isScreenSharing: false });
+    }
     createRemoteCard(peerId, peerName || "User");
 
     const pc = new RTCPeerConnection({
@@ -494,7 +760,6 @@ const html = `<!DOCTYPE html>
 
     pc.onicecandidate = (event) => {
       if (!event.candidate || !ws || ws.readyState !== WebSocket.OPEN) return;
-
       ws.send(JSON.stringify({
         type: "candidate",
         room,
@@ -521,9 +786,7 @@ const html = `<!DOCTYPE html>
         video.autoplay = true;
         video.playsInline = true;
         video.muted = false;
-        video.play().catch((err) => {
-          console.log("Autoplay blocked:", err);
-        });
+        video.play().catch(() => {});
       }
 
       addLog("Receiving " + event.track.kind + " from " + (remoteNames.get(peerId) || "User"));
@@ -533,23 +796,18 @@ const html = `<!DOCTYPE html>
       const state = pc.connectionState;
       const peerDisplayName = remoteNames.get(peerId) || "User";
 
-      if (state === "connected") {
-        addLog("Connected with " + peerDisplayName);
-      } else if (state === "failed") {
-        addLog("Connection failed with " + peerDisplayName);
-      } else if (state === "disconnected") {
-        addLog("Disconnected from " + peerDisplayName);
-      } else if (state === "closed") {
-        addLog("Connection closed with " + peerDisplayName);
-      }
+      if (state === "connected") addLog("Connected with " + peerDisplayName);
+      else if (state === "failed") addLog("Connection failed with " + peerDisplayName);
+      else if (state === "disconnected") addLog("Disconnected from " + peerDisplayName);
+      else if (state === "closed") addLog("Connection closed with " + peerDisplayName);
 
       updateGlobalStatus();
     };
 
     if (localStream) {
-      for (const track of localStream.getTracks()) {
-        pc.addTrack(track, localStream);
-      }
+      if (processedAudioTrack) pc.addTrack(processedAudioTrack, localStream);
+      const videoTrack = getCurrentVideoTrack();
+      if (videoTrack) pc.addTrack(videoTrack, localStream);
     }
 
     if (shouldInitiate) {
@@ -582,6 +840,7 @@ const html = `<!DOCTYPE html>
     }
     remoteStreams.delete(peerId);
     remoteNames.delete(peerId);
+    peerMeta.delete(peerId);
     removeRemoteCard(peerId);
     updateGlobalStatus();
   }
@@ -602,14 +861,8 @@ const html = `<!DOCTYPE html>
       ? "Joined room: " + room + "\\nConnected peers: " + connectedPeers + "/" + totalOthers
       : "Not connected";
 
-    if (!hasCamera && !isScreenSharing) {
-      text += "\\nAudio-only mode";
-    }
-
-    if (isScreenSharing) {
-      text += "\\nScreen sharing is active";
-    }
-
+    if (!hasCamera && !isScreenSharing) text += "\\nAudio-only mode";
+    if (isScreenSharing) text += "\\nScreen sharing is active";
     if (joined && totalOthers > 0 && connectedPeers < totalOthers) {
       text += "\\nSome users may still be connecting...";
     }
@@ -681,14 +934,27 @@ const html = `<!DOCTYPE html>
   }
 
   async function replaceVideoTrackForAllPeers(newTrack) {
-    for (const pc of peerConnections.values()) {
+    for (const [peerId, pc] of peerConnections.entries()) {
       const sender = pc.getSenders().find(s => s.track && s.track.kind === "video");
+
       if (sender) {
         await sender.replaceTrack(newTrack);
       } else if (newTrack && localStream) {
         pc.addTrack(newTrack, localStream);
       }
+
+      const meta = peerMeta.get(peerId) || { isScreenSharing: false };
+      peerMeta.set(peerId, meta);
     }
+  }
+
+  function broadcastScreenState(isSharing) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !joined) return;
+    ws.send(JSON.stringify({
+      type: "screen-state",
+      room,
+      isScreenSharing: isSharing
+    }));
   }
 
   async function startScreenShare() {
@@ -711,12 +977,13 @@ const html = `<!DOCTYPE html>
 
       await replaceVideoTrackForAllPeers(screenTrack);
 
-      const newStream = new MediaStream();
-      const audioTracks = localStream ? localStream.getAudioTracks() : [];
-      for (const audioTrack of audioTracks) newStream.addTrack(audioTrack);
-      newStream.addTrack(screenTrack);
+      const previewStream = new MediaStream();
+      if (processedAudioTrack) previewStream.addTrack(processedAudioTrack);
+      previewStream.addTrack(screenTrack);
 
-      localVideo.srcObject = newStream;
+      localVideo.srcObject = previewStream;
+      localCard.classList.add("screen-share");
+
       shareScreenBtn.disabled = true;
       stopShareBtn.disabled = false;
       toggleCamBtn.disabled = true;
@@ -724,6 +991,7 @@ const html = `<!DOCTYPE html>
       addLog("Started screen sharing");
       updateModeText();
       updateGlobalStatus();
+      broadcastScreenState(true);
 
       screenTrack.onended = async () => {
         await stopScreenShare();
@@ -745,32 +1013,45 @@ const html = `<!DOCTYPE html>
 
     screenTrack = null;
 
-    if (cameraTrack && localStream) {
-      await replaceVideoTrackForAllPeers(cameraTrack);
+    const restoredTrack = cameraTrack || null;
+    await replaceVideoTrackForAllPeers(restoredTrack);
 
-      const restoredStream = new MediaStream();
-      for (const audioTrack of localStream.getAudioTracks()) restoredStream.addTrack(audioTrack);
-      restoredStream.addTrack(cameraTrack);
-      localVideo.srcObject = restoredStream;
+    const restoredStream = new MediaStream();
+    if (processedAudioTrack) restoredStream.addTrack(processedAudioTrack);
+    if (restoredTrack) restoredStream.addTrack(restoredTrack);
 
+    localVideo.srcObject = restoredStream;
+    localCard.classList.remove("screen-share");
+
+    shareScreenBtn.disabled = false;
+    stopShareBtn.disabled = true;
+
+    if (hasCamera) {
       toggleCamBtn.disabled = false;
       toggleCamBtn.textContent = camEnabled ? "Turn off camera" : "Turn on camera";
     } else {
-      const audioOnlyStream = new MediaStream();
-      if (localStream) {
-        for (const audioTrack of localStream.getAudioTracks()) audioOnlyStream.addTrack(audioTrack);
-      }
-      localVideo.srcObject = audioOnlyStream;
       toggleCamBtn.disabled = true;
       toggleCamBtn.textContent = "No camera found";
     }
 
-    shareScreenBtn.disabled = false;
-    stopShareBtn.disabled = true;
     localLabel.textContent = myName + " (you)";
     addLog("Stopped screen sharing");
     updateModeText();
     updateGlobalStatus();
+    broadcastScreenState(false);
+  }
+
+  function sendChat() {
+    const text = chatInput.value.trim();
+    if (!text || !joined || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    ws.send(JSON.stringify({
+      type: "chat-message",
+      room,
+      text
+    }));
+
+    chatInput.value = "";
   }
 
   async function joinRoom() {
@@ -815,9 +1096,19 @@ const html = `<!DOCTYPE html>
       if (data.type === "joined-ok") {
         joined = true;
         myId = data.yourId;
+        clearChat();
         history.replaceState({}, "", "?room=" + encodeURIComponent(room));
         addLog("You joined room: " + room);
         updateGlobalStatus();
+        updateModeText();
+        return;
+      }
+
+      if (data.type === "room-history") {
+        clearChat();
+        for (const message of data.chat || []) {
+          addChatMessage(message.name, message.text, message.time, message.id === myId);
+        }
         return;
       }
 
@@ -825,6 +1116,11 @@ const html = `<!DOCTYPE html>
         renderUsers(data.users);
         syncPeerConnections(data.users);
         updateGlobalStatus();
+        return;
+      }
+
+      if (data.type === "lobby-list") {
+        renderLobby(data.rooms);
         return;
       }
 
@@ -836,6 +1132,21 @@ const html = `<!DOCTYPE html>
       if (data.type === "user-left") {
         addLog(data.name + " left the room");
         closePeer(data.id);
+        return;
+      }
+
+      if (data.type === "screen-state") {
+        const meta = peerMeta.get(data.id) || { isScreenSharing: false };
+        meta.isScreenSharing = !!data.isScreenSharing;
+        peerMeta.set(data.id, meta);
+        applyScreenShareCardStyle(data.id, meta.isScreenSharing);
+        updateRemoteLabels();
+        addLog((remoteNames.get(data.id) || data.name || "User") + (meta.isScreenSharing ? " started screen sharing" : " stopped screen sharing"));
+        return;
+      }
+
+      if (data.type === "chat-message") {
+        addChatMessage(data.name, data.text, data.time, data.id === myId);
         return;
       }
 
@@ -862,9 +1173,7 @@ const html = `<!DOCTYPE html>
     };
 
     ws.onclose = () => {
-      if (joined) {
-        addLog("Disconnected from server");
-      }
+      if (joined) addLog("Disconnected from server");
       updateGlobalStatus();
     };
 
@@ -874,7 +1183,7 @@ const html = `<!DOCTYPE html>
     };
   }
 
-  function cleanup(stopLocal) {
+  async function cleanup(stopLocal) {
     joined = false;
     myId = null;
 
@@ -888,53 +1197,85 @@ const html = `<!DOCTYPE html>
     }
 
     renderUsers([]);
+    clearChat();
 
-    if (stopLocal && localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-      localStream = null;
-      cameraTrack = null;
+    if (stopLocal) {
+      if (screenTrack) {
+        try { screenTrack.stop(); } catch {}
+      }
       screenTrack = null;
-      localVideo.srcObject = null;
-      hasCamera = true;
       isScreenSharing = false;
+
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          try { track.stop(); } catch {}
+        });
+      }
+      localStream = null;
+
+      if (rawMicStream) {
+        rawMicStream.getTracks().forEach(track => {
+          try { track.stop(); } catch {}
+        });
+      }
+      rawMicStream = null;
+      processedAudioTrack = null;
+
+      if (audioContext) {
+        try { await audioContext.close(); } catch {}
+      }
+      audioContext = null;
+
+      cameraTrack = null;
+      localVideo.srcObject = null;
+
+      hasCamera = true;
       toggleCamBtn.disabled = false;
       toggleCamBtn.textContent = "Turn off camera";
       shareScreenBtn.disabled = false;
       stopShareBtn.disabled = true;
+      localCard.classList.remove("screen-share");
       updateModeText();
     }
   }
 
-  function leaveRoom() {
+  async function leaveRoom() {
     addLog("You left the room");
-    cleanup(true);
+    await cleanup(true);
     setStatus("Left room");
   }
 
   toggleMicBtn.onclick = () => {
-    if (!localStream) return;
     micEnabled = !micEnabled;
-    localStream.getAudioTracks().forEach(track => {
-      track.enabled = micEnabled;
-    });
+    if (processedAudioTrack) processedAudioTrack.enabled = micEnabled;
     toggleMicBtn.textContent = micEnabled ? "Mute mic" : "Unmute mic";
     addLog(micEnabled ? "Microphone unmuted" : "Microphone muted");
   };
 
-  toggleCamBtn.onclick = () => {
+  toggleCamBtn.onclick = async () => {
     if (!localStream || !hasCamera || isScreenSharing) return;
     camEnabled = !camEnabled;
-    localStream.getVideoTracks().forEach(track => {
-      track.enabled = camEnabled;
-    });
+    if (cameraTrack) cameraTrack.enabled = camEnabled;
     toggleCamBtn.textContent = camEnabled ? "Turn off camera" : "Turn on camera";
     addLog(camEnabled ? "Camera turned on" : "Camera turned off");
   };
 
   shareScreenBtn.onclick = startScreenShare;
   stopShareBtn.onclick = stopScreenShare;
-  leaveBtn.onclick = leaveRoom;
+  leaveBtn.onclick = () => { leaveRoom(); };
   joinBtn.onclick = joinRoom;
+  sendChatBtn.onclick = sendChat;
+
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendChat();
+  });
+
+  document.querySelectorAll(".emoji-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      chatInput.value += btn.dataset.emoji;
+      chatInput.focus();
+    });
+  });
 
   copyBtn.onclick = async () => {
     const roomVal = roomInput.value.trim();
@@ -971,6 +1312,11 @@ wss.on("connection", (ws) => {
   ws.userName = null;
   ws.clientId = Math.random().toString(36).slice(2, 10);
 
+  ws.send(JSON.stringify({
+    type: "lobby-list",
+    rooms: getLobbyList()
+  }));
+
   ws.on("message", (message) => {
     let data;
     try {
@@ -985,37 +1331,35 @@ wss.on("connection", (ws) => {
 
       if (!roomName) return;
 
-      if (!rooms.has(roomName)) {
-        rooms.set(roomName, new Set());
-      }
+      const room = getRoom(roomName);
 
-      const peers = rooms.get(roomName);
-
-      if (peers.size >= MAX_ROOM_SIZE) {
+      if (room.clients.size >= MAX_ROOM_SIZE) {
         ws.send(JSON.stringify({ type: "room-full" }));
         return;
       }
 
       ws.room = roomName;
       ws.userName = userName;
-      peers.add(ws);
+      room.clients.add(ws);
 
       ws.send(JSON.stringify({
         type: "joined-ok",
         yourId: ws.clientId
       }));
 
-      for (const client of peers) {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify({
-            type: "user-joined",
-            id: ws.clientId,
-            name: ws.userName
-          }));
-        }
-      }
+      ws.send(JSON.stringify({
+        type: "room-history",
+        chat: room.chat
+      }));
+
+      broadcastToRoom(roomName, {
+        type: "user-joined",
+        id: ws.clientId,
+        name: ws.userName
+      }, ws);
 
       broadcastRoomUsers(roomName);
+      broadcastLobbyList();
       return;
     }
 
@@ -1032,31 +1376,69 @@ wss.on("connection", (ws) => {
         sdp: data.sdp,
         candidate: data.candidate
       });
+      return;
+    }
+
+    if (data.type === "screen-state") {
+      broadcastToRoom(ws.room, {
+        type: "screen-state",
+        id: ws.clientId,
+        name: ws.userName,
+        isScreenSharing: !!data.isScreenSharing
+      }, ws);
+      return;
+    }
+
+    if (data.type === "chat-message") {
+      const room = rooms.get(ws.room);
+      if (!room) return;
+
+      const text = String(data.text || "").trim().slice(0, 500);
+      if (!text) return;
+
+      const chatItem = {
+        id: ws.clientId,
+        name: ws.userName,
+        text,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      };
+
+      room.chat.push(chatItem);
+      if (room.chat.length > 100) {
+        room.chat.shift();
+      }
+
+      broadcastToRoom(ws.room, {
+        type: "chat-message",
+        ...chatItem
+      });
+      return;
     }
   });
 
   ws.on("close", () => {
     const roomName = ws.room;
-    if (!roomName || !rooms.has(roomName)) return;
-
-    const peers = rooms.get(roomName);
-    peers.delete(ws);
-
-    for (const client of peers) {
-      if (client.readyState === 1) {
-        client.send(JSON.stringify({
-          type: "user-left",
-          id: ws.clientId,
-          name: ws.userName
-        }));
-      }
+    if (!roomName || !rooms.has(roomName)) {
+      broadcastLobbyList();
+      return;
     }
 
-    if (peers.size === 0) {
+    const room = rooms.get(roomName);
+    room.clients.delete(ws);
+
+    broadcastToRoom(roomName, {
+      type: "user-left",
+      id: ws.clientId,
+      name: ws.userName
+    });
+
+    if (room.clients.size === 0) {
       rooms.delete(roomName);
     } else {
       broadcastRoomUsers(roomName);
     }
+
+    broadcastLobbyList();
   });
 });
 
